@@ -16,16 +16,13 @@ _sep = _os.sep
 
 
 def job(gpu, et_obj, dspec, dataset_cls, trainer_cls, data_splitter):
-    if not et_obj.args['world_size']:
-        et_obj.args['world_size'] = et_obj.args['num_gpus'] * et_obj.args['num_nodes']
-
-    et_obj.args['world_rank'] = et_obj.args['node_rank'] * et_obj.args['num_gpus'] + gpu
-    et_obj.args['num_gpus'] = et_obj.args['num_gpus']
-
+    world_size = et_obj.args['world_size']
+    if not world_size:
+        world_size = et_obj.args['num_gpus'] * et_obj.args['num_nodes']
+    world_rank = et_obj.args['node_rank'] * et_obj.args['num_gpus'] + gpu
     _dist.init_process_group(backend=et_obj.args['dist_backend'],
                              init_method=et_obj.args['dist_url'],
-                             world_size=et_obj.args['world_size'], rank=et_obj.args['world_rank'])
-
+                             world_size=world_size, rank=world_rank)
     et_obj._run(dspec, dataset_cls, trainer_cls, data_splitter)
 
 
@@ -276,8 +273,8 @@ class EasyTorch:
         """
         for dspec in self.dataspecs:
             if self.args['use_ddp']:
-                _mp.spawn(job, nprocs=self.args['num_gpus'],
-                          args=(self, dspec, dataset_cls, trainer_cls, data_splitter))
+                _mp.spawn(test, nprocs=self.args['num_gpus'],
+                          args=('HI There', ))
             else:
                 self._run(dspec, dataset_cls, trainer_cls, data_splitter)
 
