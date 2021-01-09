@@ -9,9 +9,7 @@ import typing as _typing
 
 import numpy as _np
 import torch as _torch
-
-_eps = 10e-5
-_num_precision = 5
+from easytorch.config import metrics_num_precision as _nump, metrics_eps as _eps
 
 
 class ETAverages:
@@ -70,7 +68,7 @@ class ETAverages:
 
     @property
     def num_precision(self):
-        return _num_precision
+        return _nump
 
     @property
     def time(self):
@@ -127,7 +125,7 @@ class ETMetrics:
         r"""
         Numerical Precision(default 5) for nice looking numbers.
         """
-        return _num_precision
+        return _nump
 
     @property
     def time(self):

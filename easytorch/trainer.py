@@ -13,11 +13,13 @@ import easytorch.utils as _etutils
 from easytorch.metrics import metrics as _base_metrics
 from easytorch.utils.tensorutils import initialize_weights as _init_weights
 from .vision import plot as _log_utils
+import easytorch.config as _cf
+
 _sep = _os.sep
 
 
 class ETTrainer:
-    def __init__(self, args: dict):
+    def __init__(self, args: dict, device=_torch.device("cpu")):
         r"""
         args: receives the arguments passed by the ArgsParser.
         cache: Initialize all immediate things here. Like scores, loss, accuracies...
@@ -27,7 +29,7 @@ class ETTrainer:
         self.args = _etutils.FrozenDict(args)
         self.cache = _ODict()
         self.nn = _ODict()
-        self.device = _ODict()
+        self.device = _ODict({'gpu': device})
         self.optimizer = _ODict()
 
     def init_nn(self):
@@ -103,14 +105,14 @@ class ETTrainer:
         Expects list of GPUS as [0, 1, 2, 3]., list of GPUS will make it use DataParallel.
         If no GPU is present, CPU is used.
         """
-        self.device['gpu'] = _torch.device("cpu")
-        if _torch.cuda.is_available():
-            if len(self.args['gpus']) < 2:
+        if _cf.cuda_available:
+            if not self.args['use_ddp']:
                 self.device['gpu'] = _torch.device(f"cuda:{self.args['gpus'][0]}")
             else:
-                self.device['gpu'] = _torch.device("cuda:0")
                 for model_key in self.nn:
-                    self.nn[model_key] = _torch.nn.DataParallel(self.nn[model_key], self.args['gpus'])
+                    self.nn[model_key] = _torch.nn.parallel.DistributedDataParallel(self.nn[model_key],
+                                                                                    device_ids=[self.device['gpu']])
+
         for model_key in self.nn:
             self.nn[model_key] = self.nn[model_key].to(self.device['gpu'])
 
@@ -265,7 +267,8 @@ class ETTrainer:
 
         eval_loss = self.new_averages()
         eval_metrics = self.new_metrics()
-        val_loaders = [_etdata.ETDataLoader.new(shuffle=False, dataset=d, **self.args) for d in dataset_list]
+        val_loaders = [_etdata.ETDataLoader.new(shuffle=False, dataset=d, mode='eval', **self.args)
+                       for d in dataset_list]
         with _torch.no_grad():
             for loader in val_loaders:
                 its = []
@@ -332,7 +335,7 @@ class ETTrainer:
         r"""
         Main training loop.
         """
-        train_loader = _etdata.ETDataLoader.new(shuffle=True, dataset=dataset, **self.args)
+        train_loader = _etdata.ETDataLoader.new(shuffle=True, dataset=dataset, mode='train', **self.args)
         for ep in range(1, self.args['epochs'] + 1):
 
             for k in self.nn:
@@ -374,5 +377,3 @@ class ETTrainer:
             self._on_epoch_end(ep, ep_loss, ep_metrics, val_loss, val_metric)
             if self._early_stopping(ep, ep_loss, ep_metrics, val_loss, val_metric):
                 break
-
-

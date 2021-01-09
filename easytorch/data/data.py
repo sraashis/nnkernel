@@ -1,7 +1,7 @@
 import json as _json
 import os as _os
 
-from torch.utils.data import DataLoader as _DataLoader, Dataset as _Dataset
+import torch.utils.data as _data
 from torch.utils.data._utils.collate import default_collate as _default_collate
 
 
@@ -12,14 +12,14 @@ def safe_collate(batch):
     return _default_collate([b for b in batch if b])
 
 
-class ETDataLoader(_DataLoader):
+class ETDataLoader(_data.DataLoader):
 
     def __init__(self, **kw):
         super(ETDataLoader, self).__init__(**kw)
 
     @classmethod
     def new(cls, **kw):
-        _kw = {
+        loader_kw = {
             'dataset': None,
             'batch_size': 1,
             'sampler': None,
@@ -31,12 +31,20 @@ class ETDataLoader(_DataLoader):
             'timeout': 0,
             'worker_init_fn': None
         }
-        for k in _kw.keys():
-            _kw[k] = kw.get(k, _kw.get(k))
-        return cls(collate_fn=safe_collate, **_kw)
+
+        for k in loader_kw.keys():
+            loader_kw[k] = kw.get(k, loader_kw.get(k))
+
+        if kw.get('use_ddp'):
+            if kw.get('mode') == 'train':
+                loader_kw['sampler'] = _data.distributed.DistributedSampler(loader_kw['dataset'])
+            loader_kw['num_workers'] = (loader_kw['num_workers'] + kw['num_gpus'] - 1) // kw['num_gpus']
+            loader_kw['batch_size'] = loader_kw['batch_size'] // kw['num_gpus']
+
+        return cls(collate_fn=safe_collate, **loader_kw)
 
 
-class ETDataset(_Dataset):
+class ETDataset(_data.Dataset):
     def __init__(self, mode='init', limit=float('inf')):
         self.mode = mode
         self.limit = limit

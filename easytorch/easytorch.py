@@ -4,18 +4,48 @@ from argparse import ArgumentParser as _AP
 
 from typing import List as _List, Union as _Union, Callable as _Callable
 
-import easytorch.utils as _etutils
 from easytorch.data import datautils as _du
 from easytorch.vision import plot as _logutils
-from .etargs import default_args as _ap
+import easytorch.config as _cf
+import torch.distributed as _dist
+import torch.multiprocessing as _mp
+import warnings as _warn
+import functools as _functools
+
 _sep = _os.sep
+
+
+def job(gpu, et_obj, dspec, dataset_cls, trainer_cls, data_splitter):
+    if not et_obj.args['world_size']:
+        et_obj.args['world_size'] = et_obj.args['num_gpus'] * et_obj.args['num_nodes']
+
+    et_obj.args['world_rank'] = et_obj.args['node_rank'] * et_obj.args['num_gpus'] + gpu
+    et_obj.args['num_gpus'] = et_obj.args['num_gpus']
+
+    _dist.init_process_group(backend=et_obj.args['dist_backend'],
+                             init_method=et_obj.args['dist_url'],
+                             world_size=et_obj.args['world_size'], rank=et_obj.args['world_rank'])
+
+    et_obj._run(dspec, dataset_cls, trainer_cls, data_splitter)
+
+
+def test(i, a):
+    print(i, a)
 
 
 class EasyTorch:
     _MODES_ = ['test', 'train']
+    _MODE_ERR_ = \
+        'argument *** phase *** is required and must be passed to either' \
+        '\n1). EasyTorch(..,phase=<value>,..)' \
+        '\n2). runtime arguments 2). python main.py -ph <value> | ' \
+        f'\nPossible values are:{_MODES_}' \
+        '\n\t- train (runs all train, validation, and test steps)' \
+        '\n\t- test (only runs test step; either by picking best saved model, ' \
+        '\n\tor loading provided weights in pretrained_path argument) '
 
     def __init__(self, dataspecs: _List[dict],
-                 args: _Union[dict, _AP] = _ap,
+                 args: _Union[dict, _AP] = _cf.default_args,
                  phase: str = None,
                  batch_size: int = None,
                  epochs: int = None,
@@ -36,13 +66,7 @@ class EasyTorch:
                  split_ratio: _List[float] = None,
                  **kw):
 
-        if isinstance(args, _AP):
-            self.args = vars(args.parse_args())
-        elif isinstance(args, dict):
-            self.args = {**args}
-        else:
-            raise ValueError('2nd Argument of EasyTorch could be only one of :ArgumentParser, dict')
-
+        self._init_args_(args)
         if phase: self.args.update(phase=phase)
         if batch_size: self.args.update(batch_size=batch_size)
         if epochs: self.args.update(epochs=epochs)
@@ -61,21 +85,37 @@ class EasyTorch:
         if load_sparse: self.args.update(load_sparse=load_sparse)
         if num_folds: self.args.update(num_folds=num_folds)
         if split_ratio: self.args.update(split_ratio=split_ratio)
-
         self.args.update(**kw)
-        self.args = _etutils.FrozenDict(self.args)
+        self._init_dataspecs_(dataspecs)
 
-        assert (self.args['phase'] in self._MODES_), \
-            'argument *** phase *** is required and must be passed to either' \
-            '\n1). EasyTorch(..,phase=<value>,..)' \
-            '\n2). runtime arguments 2). python main.py -ph <value> | ' \
-            f'\nPossible values are:{self._MODES_}' \
-            '\n\t- train (runs all train, validation, and test steps)' \
-            '\n\t- test (only runs test step; either by picking best saved model, ' \
-            '\n\tor loading provided weights in pretrained_path argument) '
+        assert (self.args.get('phase') in self._MODES_), self._MODE_ERR_
 
+        self.args.update(verbose=self.args.get('verbose', True))
+        self.args.update(gpus=self.args.get('gpus', []))
+
+        if self.args['verbose'] and len(self.args['gpus']) > _cf.num_gpus:
+            _warn.warn(f"Number of GPUs provided: {len(self.args['gpus'])}, but only {_cf.num_gpus} available.\n")
+            self.args['gpus'] = list(range(_cf.num_gpus))
+
+        if self.args['verbose'] and len(self.args['gpus']) > 0 and not _cf.cuda_available:
+            _warn.warn(f"arg '-gpus' {self.args['gpus']} provided by default "
+                       f"but cuda not available. Using CPU(slow).\n")
+
+        self._init_ddp_()
+
+        # self.args = _etutils.FrozenDict(self.args)
+
+    def _init_args_(self, args):
+        if isinstance(args, _AP):
+            self.args = vars(args.parse_args())
+        elif isinstance(args, dict):
+            self.args = {**args}
+        else:
+            raise ValueError('2nd Argument of EasyTorch could be only one of :ArgumentParser, dict')
+
+    def _init_dataspecs_(self, dataspecs):
         """
-        Need to add -data(base folder for dataset) to all the directories in dataspecs. 
+        Need to add -data(base folder for dataset) to all the directories in dataspecs.
         THis makes it flexible to access dataset from arbitrary location.
         """
         self.dataspecs = [{**dspec} for dspec in dataspecs]
@@ -83,6 +123,13 @@ class EasyTorch:
             for k in dspec:
                 if 'dir' in k:
                     dspec[k] = _os.path.join(self.args['dataset_dir'], dspec[k])
+
+    def _init_ddp_(self):
+        if all([_cf.cuda_available, _cf.num_gpus > 1, len(self.args['gpus']) > 1]):
+            self.args['use_ddp'] = True
+            self.args['num_gpus'] = len(self.args['gpus'])
+        else:
+            self.args['use_ddp'] = False
 
     def _get_train_dataset(self, split, dspec, dataset_cls):
         r"""
@@ -122,115 +169,120 @@ class EasyTorch:
             test_dataset_list.append(test_dataset)
         return test_dataset_list
 
+    def _run(self, dspec, dataset_cls, trainer_cls,
+             data_splitter: _Callable = _du.init_kfolds_):
+        trainer = trainer_cls(self.args)
+
+        trainer.cache['log_dir'] = self.args['log_dir'] + _sep + dspec['name']
+        if _du.create_splits_(trainer.cache['log_dir'], dspec):
+            data_splitter(dspec=dspec, args=self.args)
+
+        """
+        We will save the global scores of all folds if any.
+        """
+        global_score = trainer.new_metrics()
+        global_averages = trainer.new_averages()
+        trainer.cache['global_test_score'] = []
+
+        """
+        The easytorch.metrics.Prf1a() has Precision,Recall,F1,Accuracy,and Overlap implemented.
+         We use F1 as default score to monitor while doing validation and save best model.
+         And we will have loss returned by easytorch.metrics.Averages() while training.
+        """
+        trainer.cache['log_header'] = 'Loss,Precision,Recall,F1,Accuracy'
+        trainer.cache.update(monitor_metric='f1', metric_direction='maximize')
+
+        """
+        reset_dataset_cache() is an intervention to set any specific needs for each dataset. For example:
+            - custom log_dir
+            - Monitor some other metrics
+            - Set metrics direction differently.
+        """
+        trainer.reset_dataset_cache()
+
+        """
+        Run for each splits.
+        """
+        _os.makedirs(trainer.cache['log_dir'], exist_ok=True)
+        for split_file in _os.listdir(dspec['split_dir']):
+            split = _json.loads(open(dspec['split_dir'] + _sep + split_file).read())
+
+            """
+            Experiment id is split file name. For the example of k-fold.
+            """
+            trainer.cache['experiment_id'] = split_file.split('.')[0]
+            trainer.cache['checkpoint'] = trainer.cache['experiment_id'] + '.pt'
+            trainer.cache.update(best_epoch=0, best_score=0.0)
+            if trainer.cache['metric_direction'] == 'minimize':
+                trainer.cache['best_score'] = 1e11
+
+            trainer.check_previous_logs()
+            trainer.init_nn()
+
+            """
+            Clear cache to save scores for each fold
+            """
+            trainer.cache.update(training_log=[], validation_log=[], test_score=[])
+
+            """
+            An intervention point if anyone wants to change things for each fold.
+            """
+            trainer.reset_fold_cache()
+
+            """###########  Run training phase ########################"""
+            if self.args['phase'] == 'train':
+                trainset = self._get_train_dataset(split, dspec, dataset_cls)
+                valset = self._get_validation_dataset(split, dspec, dataset_cls)
+                trainer.train(trainset, valset)
+                cache = {**self.args, **trainer.cache, **dspec, **trainer.nn, **trainer.optimizer}
+                _logutils.save_cache(cache, experiment_id=trainer.cache['experiment_id'])
+            """#########################################################"""
+
+            if self.args['phase'] == 'train' or self.args['pretrained_path'] is None:
+                """
+                Best model will be split_name.pt in training phase, and if no pretrained path is supplied.
+                """
+                trainer.load_best_model()
+
+            """########## Run test phase. ##############################"""
+            testset = self._get_test_dataset(split, dspec, dataset_cls)
+            test_averages, test_score = trainer.evaluation(split_key='test', save_pred=True,
+                                                           dataset_list=testset)
+
+            """
+            Accumulate global scores-scores of each fold to report single global score for each datasets.
+            """
+            global_averages.accumulate(test_averages)
+            global_score.accumulate(test_score)
+
+            """
+            Save the calculated scores in list so that later we can do extra things(Like save to a file.)
+            """
+            trainer.cache['test_score'].append([*test_averages.get(), *test_score.get()])
+            trainer.cache['global_test_score'].append([split_file, *test_averages.get(), *test_score.get()])
+            _logutils.save_scores(trainer.cache, experiment_id=trainer.cache['experiment_id'],
+                                  file_keys=['test_score'])
+
+        """
+        Finally, save the global score to a file
+        """
+        trainer.cache['global_test_score'].append(['Global', *global_averages.get(), *global_score.get()])
+        _logutils.save_scores(trainer.cache, file_keys=['global_test_score'])
+
     def run(self, dataset_cls, trainer_cls,
             data_splitter: _Callable = _du.init_kfolds_):
         r"""
         Run for individual datasets
         """
         for dspec in self.dataspecs:
-            trainer = trainer_cls(self.args)
+            if self.args['use_ddp']:
+                _mp.spawn(job, nprocs=self.args['num_gpus'],
+                          args=(self, dspec, dataset_cls, trainer_cls, data_splitter))
+            else:
+                self._run(dspec, dataset_cls, trainer_cls, data_splitter)
 
-            trainer.cache['log_dir'] = self.args['log_dir'] + _sep + dspec['name']
-            if _du.create_splits_(trainer.cache['log_dir'], dspec):
-                data_splitter(dspec=dspec, args=self.args)
-
-            """
-            We will save the global scores of all folds if any.
-            """
-            global_score = trainer.new_metrics()
-            global_averages = trainer.new_averages()
-            trainer.cache['global_test_score'] = []
-
-            """
-            The easytorch.metrics.Prf1a() has Precision,Recall,F1,Accuracy,and Overlap implemented.
-             We use F1 as default score to monitor while doing validation and save best model.
-             And we will have loss returned by easytorch.metrics.Averages() while training.
-            """
-            trainer.cache['log_header'] = 'Loss,Precision,Recall,F1,Accuracy'
-            trainer.cache.update(monitor_metric='f1', metric_direction='maximize')
-
-            """
-            reset_dataset_cache() is an intervention to set any specific needs for each dataset. For example:
-                - custom log_dir
-                - Monitor some other metrics
-                - Set metrics direction differently.
-            """
-            trainer.reset_dataset_cache()
-
-            """
-            Run for each splits.
-            """
-            _os.makedirs(trainer.cache['log_dir'], exist_ok=True)
-            for split_file in _os.listdir(dspec['split_dir']):
-                split = _json.loads(open(dspec['split_dir'] + _sep + split_file).read())
-
-                """
-                Experiment id is split file name. For the example of k-fold.
-                """
-                trainer.cache['experiment_id'] = split_file.split('.')[0]
-                trainer.cache['checkpoint'] = trainer.cache['experiment_id'] + '.pt'
-                trainer.cache.update(best_epoch=0, best_score=0.0)
-                if trainer.cache['metric_direction'] == 'minimize':
-                    trainer.cache['best_score'] = 1e11
-
-                trainer.check_previous_logs()
-                trainer.init_nn()
-
-                """
-                Clear cache to save scores for each fold
-                """
-                trainer.cache.update(training_log=[], validation_log=[], test_score=[])
-
-                """
-                An intervention point if anyone wants to change things for each fold.
-                """
-                trainer.reset_fold_cache()
-
-                """###########  Run training phase ########################"""
-                if self.args['phase'] == 'train':
-                    trainset = self._get_train_dataset(split, dspec, dataset_cls)
-                    valset = self._get_validation_dataset(split, dspec, dataset_cls)
-                    trainer.train(trainset, valset)
-                    cache = {**self.args, **trainer.cache, **dspec, **trainer.nn, **trainer.optimizer}
-                    _logutils.save_cache(cache, experiment_id=trainer.cache['experiment_id'])
-                """#########################################################"""
-
-                if self.args['phase'] == 'train' or self.args['pretrained_path'] is None:
-                    """
-                    Best model will be split_name.pt in training phase, and if no pretrained path is supplied.
-                    """
-                    trainer.load_best_model()
-
-                """########## Run test phase. ##############################"""
-                testset = self._get_test_dataset(split, dspec, dataset_cls)
-                test_averages, test_score = trainer.evaluation(split_key='test', save_pred=True,
-                                                               dataset_list=testset)
-
-                """
-                Accumulate global scores-scores of each fold to report single global score for each datasets.
-                """
-                global_averages.accumulate(test_averages)
-                global_score.accumulate(test_score)
-
-                """
-                Save the calculated scores in list so that later we can do extra things(Like save to a file.)
-                """
-                trainer.cache['test_score'].append([*test_averages.get(), *test_score.get()])
-                trainer.cache['global_test_score'].append([split_file, *test_averages.get(), *test_score.get()])
-                _logutils.save_scores(trainer.cache, experiment_id=trainer.cache['experiment_id'],
-                                      file_keys=['test_score'])
-
-            """
-            Finally, save the global score to a file
-            """
-            trainer.cache['global_test_score'].append(['Global', *global_averages.get(), *global_score.get()])
-            _logutils.save_scores(trainer.cache, file_keys=['global_test_score'])
-
-    def run_pooled(self, dataset_cls, trainer_cls,
-                   data_splitter: _Callable = _du.init_kfolds_):
-        r"""
-        Run in pooled fashion.
-        """
+    def _run_pooled(self, dataset_cls, trainer_cls,
+                    data_splitter: _Callable = _du.init_kfolds_):
         trainer = trainer_cls(self.args)
 
         """
@@ -316,3 +368,10 @@ class EasyTorch:
         global_score.accumulate(test_score)
         trainer.cache['test_score'].append(['Global', *global_averages.get(), *global_score.get()])
         _logutils.save_scores(trainer.cache, experiment_id=trainer.cache['experiment_id'], file_keys=['test_score'])
+
+    def run_pooled(self, dataset_cls, trainer_cls,
+                   data_splitter: _Callable = _du.init_kfolds_):
+        r"""
+        Run in pooled fashion.
+        """
+        self._run_pooled(dataset_cls, trainer_cls, data_splitter)

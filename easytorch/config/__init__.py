@@ -1,3 +1,11 @@
+import torch as _torch
+
+cuda_available = _torch.cuda.is_available()
+num_gpus = _torch.cuda.device_count()
+
+metrics_eps = 10e-5
+metrics_num_precision = 5
+
 import argparse as _ap
 
 import random as _random
@@ -46,3 +54,14 @@ default_args.add_argument('-lsp', '--load_sparse', default=False, type=boolean_s
 default_args.add_argument('-nf', '--num_folds', default=None, type=int, help='Number of folds.')
 default_args.add_argument('-rt', '--split_ratio', default=[0.6, 0.2, 0.2], nargs='*', type=float,
                           help='Split ratio. Eg: 0.6 0.2 0.2 or 0.8 0.2')
+
+default_args.add_argument('--node-rank', default=0, type=int,
+                          help='Node rank for distributed training')
+default_args.add_argument('--num-nodes', default=1, type=int,
+                          help='Number of nodes for distributed training')
+default_args.add_argument('--world-size', default=None, type=int,
+                          help='Number of nodes for distributed training')
+default_args.add_argument('--dist-url', default='tcp://224.66.41.62:23456', type=str,
+                          help='Url used to set up distributed training')
+default_args.add_argument('--dist-backend', default='nccl', type=str,
+                          help='Distributed backend')

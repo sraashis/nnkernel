@@ -17,3 +17,7 @@ class FrozenDict(dict):
     def update(self, **kw):
         for k, v in kw.items():
             self[k] = v
+
+
+def msg_only(msg, *args, **kwargs):
+    return str(msg) + '\n'
