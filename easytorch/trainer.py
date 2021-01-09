@@ -12,7 +12,7 @@ import easytorch.data as _etdata
 import easytorch.utils as _etutils
 from easytorch.metrics import metrics as _base_metrics
 from easytorch.utils.tensorutils import initialize_weights as _init_weights
-from .vision import plot as _log_utils
+from .vision import plotter as _log_utils
 import easytorch.config as _cf
 
 _sep = _os.sep
