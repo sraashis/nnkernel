@@ -265,7 +265,7 @@ class ETTrainer:
         if self.args['verbose']:
             print(f'--- Running {split_key} ---')
 
-        eval_loss = self.new_averages()
+        eval_avg = self.new_averages()
         eval_metrics = self.new_metrics()
         val_loaders = [_etdata.ETDataLoader.new(shuffle=False, dataset=d, mode='eval', **self.args)
                        for d in dataset_list]
@@ -273,6 +273,7 @@ class ETTrainer:
             for loader in val_loaders:
                 its = []
                 metrics = self.new_metrics()
+                avg = self.new_averages()
                 for i, batch in enumerate(loader):
 
                     it = self.iteration(batch)
@@ -280,21 +281,22 @@ class ETTrainer:
                         it['metrics'] = _base_metrics.ETMetrics()
 
                     metrics.accumulate(it['metrics'])
-                    eval_loss.accumulate(it['averages'])
+                    avg.accumulate(it['averages'])
                     if save_pred:
                         its.append(it)
                     if self.args['verbose'] and len(dataset_list) <= 1 and i % int(_math.log(i + 1) + 1) == 0:
                         print(f"Itr:{i}/{len(loader)}, {it['averages'].get()}, {it['metrics'].get()}")
 
                 eval_metrics.accumulate(metrics)
+                eval_avg.accumulate(avg)
                 if self.args['verbose'] and len(dataset_list) > 1:
-                    print(f"{split_key}, {metrics.get()}")
+                    print(f"{split_key}, {avg.get()}, {metrics.get()}")
                 if save_pred:
                     self.save_predictions(loader.dataset, its)
 
         if self.args['verbose']:
             print(f"{self.cache['experiment_id']} {split_key} metrics: {eval_metrics.get()}")
-        return eval_loss, eval_metrics
+        return eval_avg, eval_metrics
 
     def training_iteration(self, batch):
         r"""
