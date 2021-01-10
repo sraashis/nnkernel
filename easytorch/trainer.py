@@ -32,7 +32,7 @@ class ETTrainer:
         self.device = _ODict({'gpu': device})
         self.optimizer = _ODict()
 
-    def init_nn(self):
+    def init_nn(self, **kw):
         r"""
         Call to user implementation of:
             Initialize models.
@@ -59,7 +59,7 @@ class ETTrainer:
         If path to pretrained weights are given, it will be used instead.
         """
         if self.args['pretrained_path'] is not None:
-            self._load_checkpoint(self.args['pretrained_path'])
+            self.load_checkpoint(self.args['pretrained_path'])
         elif self.args['phase'] == 'train':
             _torch.manual_seed(self.args['seed'])
             for mk in self.nn:
@@ -67,9 +67,9 @@ class ETTrainer:
 
     def load_best_model(self):
         r"""Load the best model']"""
-        self._load_checkpoint(self.cache['log_dir'] + _sep + self.cache['checkpoint'])
+        self.load_checkpoint(self.cache['log_dir'] + _sep + self.cache['checkpoint'])
 
-    def _load_checkpoint(self, full_path):
+    def load_checkpoint(self, full_path):
         r"""
         Load checkpoint from the given path:
             If it is an easytorch checkpoint, try loading all the models.
@@ -86,6 +86,12 @@ class ETTrainer:
                     self.nn[m].module.load_state_dict(chk['models'][m])
                 except:
                     self.nn[m].load_state_dict(chk['models'][m])
+
+            for m in chk['optimizers']:
+                try:
+                    self.optimizer[m].module.load_state_dict(chk['optimizers'][m])
+                except:
+                    self.optimizer[m].load_state_dict(chk['optimizers'][m])
         else:
             mkey = list(self.nn.keys())[0]
             try:
@@ -161,15 +167,21 @@ class ETTrainer:
         if i.lower() == 'n':
             raise FileExistsError(f' ##### {self.args["log_dir"]} directory is not empty. #####')
 
-    def save_checkpoint(self):
-        checkpoint = {'source': "easytorch"}
+    def save_checkpoint(self, file_name, src='easytorch'):
+        checkpoint = {'source': src}
         for k in self.nn:
             checkpoint['models'] = {}
             try:
                 checkpoint['models'][k] = self.nn[k].module.state_dict()
             except:
                 checkpoint['models'][k] = self.nn[k].state_dict()
-        _torch.save(checkpoint, self.cache['log_dir'] + _sep + self.cache['checkpoint'])
+        for k in self.optimizer:
+            checkpoint['optimizers'] = {}
+            try:
+                checkpoint['optimizers'][k] = self.optimizer[k].module.state_dict()
+            except:
+                checkpoint['optimizers'][k] = self.optimizer[k].state_dict()
+        _torch.save(checkpoint, self.cache['log_dir'] + _sep + file_name)
 
     def reset_dataset_cache(self):
         r"""
@@ -210,7 +222,7 @@ class ETTrainer:
 
         if (self.cache['metric_direction'] == 'maximize' and sc >= self.cache['best_score']) or (
                 self.cache['metric_direction'] == 'minimize' and sc <= self.cache['best_score']):
-            self.save_checkpoint()
+            self.save_checkpoint(self.cache['checkpoint'])
             self.cache['best_score'] = sc
             self.cache['best_epoch'] = epoch
             if self.args['verbose']:

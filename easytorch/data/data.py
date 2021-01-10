@@ -84,12 +84,12 @@ class ETDataset(_data.Dataset):
     def transforms(self, **kw):
         return None
 
-    def add(self, files, debug=True, **kw):
+    def add(self, files, **kw):
         r"""
         An extra layer for added flexibility.
         """
         self.dataspecs[kw['name']] = kw
-        self._load_indices(dataset_name=kw['name'], files=files, debug=debug)
+        self._load_indices(dataset_name=kw['name'], files=files, verbose=kw.get('verbose'))
 
     @classmethod
     def pool(cls, args, dataspecs, split_key=None, load_sparse=False):
