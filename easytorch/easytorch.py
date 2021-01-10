@@ -5,7 +5,7 @@ from argparse import ArgumentParser as _AP
 from typing import List as _List, Union as _Union, Callable as _Callable
 
 from easytorch.data import datautils as _du
-from easytorch.vision import plot as _logutils
+from easytorch.vision import plotter as _logutils
 import easytorch.config as _cf
 import torch.distributed as _dist
 import torch.multiprocessing as _mp
