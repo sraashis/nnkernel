@@ -5,12 +5,12 @@ from argparse import ArgumentParser as _AP
 from typing import List as _List, Union as _Union, Callable as _Callable
 
 from easytorch.data import datautils as _du
-from easytorch.vision import plotter as _logutils
-import easytorch.config as _cf
+import easytorch.config as _conf
 import torch.distributed as _dist
 import torch.multiprocessing as _mp
 import warnings as _warn
-import functools as _functools
+import easytorch.utils as _utils
+
 
 _sep = _os.sep
 
@@ -42,7 +42,7 @@ class EasyTorch:
         '\n\tor loading provided weights in pretrained_path argument) '
 
     def __init__(self, dataspecs: _List[dict],
-                 args: _Union[dict, _AP] = _cf.default_args,
+                 args: _Union[dict, _AP] = _conf.default_args,
                  phase: str = None,
                  batch_size: int = None,
                  epochs: int = None,
@@ -90,17 +90,12 @@ class EasyTorch:
         self.args.update(verbose=self.args.get('verbose', True))
         self.args.update(gpus=self.args.get('gpus', []))
 
-        if self.args['verbose'] and len(self.args['gpus']) > _cf.num_gpus:
-            _warn.warn(f"Number of GPUs provided: {len(self.args['gpus'])}, but only {_cf.num_gpus} available.\n")
-            self.args['gpus'] = list(range(_cf.num_gpus))
-
-        if self.args['verbose'] and len(self.args['gpus']) > 0 and not _cf.cuda_available:
-            _warn.warn(f"arg '-gpus' {self.args['gpus']} provided by default "
-                       f"but cuda not available. Using CPU(slow).\n")
-
+        if self.args['verbose'] and len(self.args['gpus']) > _conf.num_gpus:
+            _warn.warn(f"{len(self.args['gpus'])} GPUs requested "
+                       f"but {_conf.num_gpus if _conf.cuda_available else 'GPU not'} detected. "
+                       f"Using {_conf.num_gpus + ' GPU(s)' if _conf.cuda_available else 'CPU(Much slower)'}.\n")
+            self.args['gpus'] = list(range(_conf.num_gpus))
         self._init_ddp_()
-
-        # self.args = _etutils.FrozenDict(self.args)
 
     def _init_args_(self, args):
         if isinstance(args, _AP):
@@ -122,7 +117,7 @@ class EasyTorch:
                     dspec[k] = _os.path.join(self.args['dataset_dir'], dspec[k])
 
     def _init_ddp_(self):
-        if all([_cf.cuda_available, _cf.num_gpus > 1, len(self.args['gpus']) > 1]):
+        if all([_conf.cuda_available, _conf.num_gpus > 1, len(self.args['gpus']) > 1]):
             self.args['use_ddp'] = True
             self.args['num_gpus'] = len(self.args['gpus'])
         else:
@@ -133,7 +128,7 @@ class EasyTorch:
         Load the train data from current fold/split.
         """
         train_dataset = dataset_cls(mode='train', limit=self.args['load_limit'])
-        train_dataset.add(files=split.get('train', []), debug=self.args['verbose'], **dspec)
+        train_dataset.add(files=split.get('train', []), verbose=self.args['verbose'], **dspec)
         return train_dataset
 
     def _get_validation_dataset(self, split, dspec, dataset_cls):
@@ -141,7 +136,7 @@ class EasyTorch:
         Load the validation data from current fold/split.
         """
         val_dataset = dataset_cls(mode='eval', limit=self.args['load_limit'])
-        val_dataset.add(files=split.get('validation', []), debug=self.args['verbose'], **dspec)
+        val_dataset.add(files=split.get('validation', []), verbose=self.args['verbose'], **dspec)
         return val_dataset
 
     def _get_test_dataset(self, split, dspec, dataset_cls):
@@ -156,13 +151,13 @@ class EasyTorch:
                 if len(test_dataset_list) >= self.args['load_limit']:
                     break
                 test_dataset = dataset_cls(mode='eval', limit=self.args['load_limit'])
-                test_dataset.add(files=[f], debug=False, **dspec)
+                test_dataset.add(files=[f], verbose=False, **dspec)
                 test_dataset_list.append(test_dataset)
             if self.args['verbose']:
                 print(f'{len(test_dataset_list)} sparse dataset loaded.')
         else:
             test_dataset = dataset_cls(mode='eval', limit=self.args['load_limit'])
-            test_dataset.add(files=split.get('test', []), debug=self.args['verbose'], **dspec)
+            test_dataset.add(files=split.get('test', []), verbose=self.args['verbose'], **dspec)
             test_dataset_list.append(test_dataset)
         return test_dataset_list
 
@@ -232,7 +227,7 @@ class EasyTorch:
                 valset = self._get_validation_dataset(split, dspec, dataset_cls)
                 trainer.train(trainset, valset)
                 cache = {**self.args, **trainer.cache, **dspec, **trainer.nn, **trainer.optimizer}
-                _logutils.save_cache(cache, experiment_id=trainer.cache['experiment_id'])
+                _utils.save_cache(cache, experiment_id=trainer.cache['experiment_id'])
             """#########################################################"""
 
             if self.args['phase'] == 'train' or self.args['pretrained_path'] is None:
@@ -257,14 +252,14 @@ class EasyTorch:
             """
             trainer.cache['test_score'].append([*test_averages.get(), *test_score.get()])
             trainer.cache['global_test_score'].append([split_file, *test_averages.get(), *test_score.get()])
-            _logutils.save_scores(trainer.cache, experiment_id=trainer.cache['experiment_id'],
+            _utils.save_scores(trainer.cache, experiment_id=trainer.cache['experiment_id'],
                                   file_keys=['test_score'])
 
         """
         Finally, save the global score to a file
         """
         trainer.cache['global_test_score'].append(['Global', *global_averages.get(), *global_score.get()])
-        _logutils.save_scores(trainer.cache, file_keys=['global_test_score'])
+        _utils.save_scores(trainer.cache, file_keys=['global_test_score'])
 
     def run(self, dataset_cls, trainer_cls,
             data_splitter: _Callable = _du.init_kfolds_):
@@ -349,7 +344,7 @@ class EasyTorch:
                                            load_sparse=False)[0]
             trainer.train(train_dataset, val_dataset)
             cache = {**self.args, **trainer.cache, 'dataspecs': self.dataspecs}
-            _logutils.save_cache(cache, experiment_id=cache['experiment_id'])
+            _utils.save_cache(cache, experiment_id=cache['experiment_id'])
 
         if self.args['phase'] == 'train' or self.args['pretrained_path'] is None:
             """
@@ -364,7 +359,7 @@ class EasyTorch:
         global_averages.accumulate(test_averages)
         global_score.accumulate(test_score)
         trainer.cache['test_score'].append(['Global', *global_averages.get(), *global_score.get()])
-        _logutils.save_scores(trainer.cache, experiment_id=trainer.cache['experiment_id'], file_keys=['test_score'])
+        _utils.save_scores(trainer.cache, experiment_id=trainer.cache['experiment_id'], file_keys=['test_score'])
 
     def run_pooled(self, dataset_cls, trainer_cls,
                    data_splitter: _Callable = _du.init_kfolds_):
