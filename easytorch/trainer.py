@@ -65,9 +65,9 @@ class ETTrainer:
             for mk in self.nn:
                 _init_weights(self.nn[mk])
 
-    def load_best_model(self):
+    def load_model(self, key='checkpoint'):
         r"""Load the best model']"""
-        self.load_checkpoint(self.cache['log_dir'] + _sep + self.cache['checkpoint'])
+        self.load_checkpoint(self.cache['log_dir'] + _sep + self.cache[key])
 
     def load_checkpoint(self, full_path):
         r"""

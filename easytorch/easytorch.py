@@ -234,7 +234,7 @@ class EasyTorch:
                 """
                 Best model will be split_name.pt in training phase, and if no pretrained path is supplied.
                 """
-                trainer.load_best_model()
+                trainer.load_model(key='checkpoint')
 
             """########## Run test phase. ##############################"""
             testset = self._get_test_dataset(split, dspec, dataset_cls)
@@ -350,7 +350,7 @@ class EasyTorch:
             """
             Best model will be split_name.pt in training phase, and if no pretrained path is supplied.
             """
-            trainer.load_best_model()
+            trainer.load_model(key='checkpoint')
 
         test_dataset_list = dataset_cls.pool(self.args, dataspecs=self.dataspecs, split_key='test',
                                              load_sparse=self.args['load_sparse'])
