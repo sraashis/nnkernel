@@ -61,7 +61,9 @@ default_args.add_argument('--num-nodes', default=1, type=int,
                           help='Number of nodes for distributed training')
 default_args.add_argument('--world-size', default=None, type=int,
                           help='Number of nodes for distributed training')
-default_args.add_argument('--dist-url', default='tcp://224.66.41.62:23456', type=str,
+default_args.add_argument('--dist-url', default='env://', type=str,
                           help='Url used to set up distributed training')
 default_args.add_argument('--dist-backend', default='nccl', type=str,
                           help='Distributed backend')
+
+args = vars(default_args.parse_args())

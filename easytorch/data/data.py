@@ -37,7 +37,9 @@ class ETDataLoader(_data.DataLoader):
 
         if kw.get('use_ddp'):
             if kw.get('mode') == 'train':
-                loader_kw['sampler'] = _data.distributed.DistributedSampler(loader_kw['dataset'])
+                loader_kw['sampler'] = _data.distributed.DistributedSampler(loader_kw['dataset'],
+                                                                            shuffle=loader_kw['shuffle'])
+                loader_kw['shuffle'] = False # Shuffle is mutually exclusive with sampler
             loader_kw['num_workers'] = (loader_kw['num_workers'] + kw['num_gpus'] - 1) // kw['num_gpus']
             loader_kw['batch_size'] = loader_kw['batch_size'] // kw['num_gpus']
 

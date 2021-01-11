@@ -1,21 +1,21 @@
 import json as _json
 import os as _os
+import warnings as _warn
 from argparse import ArgumentParser as _AP
-
 from typing import List as _List, Union as _Union, Callable as _Callable
 
-from easytorch.data import datautils as _du
-import easytorch.config as _conf
 import torch.distributed as _dist
 import torch.multiprocessing as _mp
-import warnings as _warn
-import easytorch.utils as _utils
 
+import easytorch.config as _conf
+import easytorch.utils as _utils
+from easytorch.data import datautils as _du
 
 _sep = _os.sep
 
 
-def job(gpu, et_obj, dspec, dataset_cls, trainer_cls, data_splitter):
+def _job_dspec(gpu, et_obj, dspec, dataset_cls, trainer_cls, data_splitter):
+    et_obj.args['verbose'] = gpu == 0
     world_size = et_obj.args['world_size']
     if not world_size:
         world_size = et_obj.args['num_gpus'] * et_obj.args['num_nodes']
@@ -23,11 +23,19 @@ def job(gpu, et_obj, dspec, dataset_cls, trainer_cls, data_splitter):
     _dist.init_process_group(backend=et_obj.args['dist_backend'],
                              init_method=et_obj.args['dist_url'],
                              world_size=world_size, rank=world_rank)
-    et_obj._run(dspec, dataset_cls, trainer_cls, data_splitter)
+    et_obj._run(gpu, dspec, dataset_cls, trainer_cls, data_splitter)
 
 
-def test(i, a):
-    print(i, a)
+def _job_pooled(gpu, et_obj, dataset_cls, trainer_cls, data_splitter):
+    et_obj.args['verbose'] = gpu == 0
+    world_size = et_obj.args['world_size']
+    if not world_size:
+        world_size = et_obj.args['num_gpus'] * et_obj.args['num_nodes']
+    world_rank = et_obj.args['node_rank'] * et_obj.args['num_gpus'] + gpu
+    _dist.init_process_group(backend=et_obj.args['dist_backend'],
+                             init_method=et_obj.args['dist_url'],
+                             world_size=world_size, rank=world_rank)
+    et_obj._run_pooled(gpu, dataset_cls, trainer_cls, data_splitter)
 
 
 class EasyTorch:
@@ -87,15 +95,19 @@ class EasyTorch:
 
         assert (self.args.get('phase') in self._MODES_), self._MODE_ERR_
 
-        self.args.update(verbose=self.args.get('verbose', True))
-        self.args.update(gpus=self.args.get('gpus', []))
+        for k in _conf.args:
+            if self.args.get(k) is None:
+                self.args[k] = _conf.args.get(k)
 
+        self._device_check_()
+        self._ddp_check_()
+
+    def _device_check_(self):
         if self.args['verbose'] and len(self.args['gpus']) > _conf.num_gpus:
             _warn.warn(f"{len(self.args['gpus'])} GPUs requested "
                        f"but {_conf.num_gpus if _conf.cuda_available else 'GPU not'} detected. "
                        f"Using {_conf.num_gpus + ' GPU(s)' if _conf.cuda_available else 'CPU(Much slower)'}.\n")
             self.args['gpus'] = list(range(_conf.num_gpus))
-        self._init_ddp_()
 
     def _init_args_(self, args):
         if isinstance(args, _AP):
@@ -116,9 +128,9 @@ class EasyTorch:
                 if 'dir' in k:
                     dspec[k] = _os.path.join(self.args['dataset_dir'], dspec[k])
 
-    def _init_ddp_(self):
+    def _ddp_check_(self):
         if all([_conf.cuda_available, _conf.num_gpus > 1, len(self.args['gpus']) > 1]):
-            self.args['use_ddp'] = True
+            self.args['use_ddp'] = True and self.args.get('use_ddp', True)
             self.args['num_gpus'] = len(self.args['gpus'])
         else:
             self.args['use_ddp'] = False
@@ -161,9 +173,9 @@ class EasyTorch:
             test_dataset_list.append(test_dataset)
         return test_dataset_list
 
-    def _run(self, dspec, dataset_cls, trainer_cls,
+    def _run(self, gpu, dspec, dataset_cls, trainer_cls,
              data_splitter: _Callable = _du.init_kfolds_):
-        trainer = trainer_cls(self.args)
+        trainer = trainer_cls(self.args, device=gpu)
 
         trainer.cache['log_dir'] = self.args['log_dir'] + _sep + dspec['name']
         if _du.create_splits_(trainer.cache['log_dir'], dspec):
@@ -234,7 +246,7 @@ class EasyTorch:
                 """
                 Best model will be split_name.pt in training phase, and if no pretrained path is supplied.
                 """
-                trainer.load_model(key='checkpoint')
+                trainer.load_checkpoint_from_key(key='checkpoint')
 
             """########## Run test phase. ##############################"""
             testset = self._get_test_dataset(split, dspec, dataset_cls)
@@ -253,7 +265,7 @@ class EasyTorch:
             trainer.cache['test_score'].append([*test_averages.get(), *test_score.get()])
             trainer.cache['global_test_score'].append([split_file, *test_averages.get(), *test_score.get()])
             _utils.save_scores(trainer.cache, experiment_id=trainer.cache['experiment_id'],
-                                  file_keys=['test_score'])
+                               file_keys=['test_score'])
 
         """
         Finally, save the global score to a file
@@ -268,14 +280,16 @@ class EasyTorch:
         """
         for dspec in self.dataspecs:
             if self.args['use_ddp']:
-                _mp.spawn(test, nprocs=self.args['num_gpus'],
-                          args=('HI There', ))
+                _os.environ['MASTER_ADDR'] = self.args.get('master_addr', '127.0.0.1')  #
+                _os.environ['MASTER_PORT'] = self.args.get('master_port', '12355')
+                _mp.spawn(_job_dspec, nprocs=self.args['num_gpus'],
+                          args=(self, dspec, dataset_cls, trainer_cls, data_splitter))
             else:
                 self._run(dspec, dataset_cls, trainer_cls, data_splitter)
 
-    def _run_pooled(self, dataset_cls, trainer_cls,
+    def _run_pooled(self, gpu, dataset_cls, trainer_cls,
                     data_splitter: _Callable = _du.init_kfolds_):
-        trainer = trainer_cls(self.args)
+        trainer = trainer_cls(self.args, device=gpu)
 
         """
         Check if the splits are given. If not, create new.
@@ -350,7 +364,7 @@ class EasyTorch:
             """
             Best model will be split_name.pt in training phase, and if no pretrained path is supplied.
             """
-            trainer.load_model(key='checkpoint')
+            trainer.load_checkpoint_from_key(key='checkpoint')
 
         test_dataset_list = dataset_cls.pool(self.args, dataspecs=self.dataspecs, split_key='test',
                                              load_sparse=self.args['load_sparse'])
@@ -366,4 +380,10 @@ class EasyTorch:
         r"""
         Run in pooled fashion.
         """
-        self._run_pooled(dataset_cls, trainer_cls, data_splitter)
+        if self.args['use_ddp']:
+            _os.environ['MASTER_ADDR'] = self.args.get('master_addr', '127.0.0.1')  #
+            _os.environ['MASTER_PORT'] = self.args.get('master_port', '12355')
+            _mp.spawn(_job_pooled, nprocs=self.args['num_gpus'],
+                      args=(self, dataset_cls, trainer_cls, data_splitter))
+        else:
+            self._run_pooled(dataset_cls, trainer_cls, data_splitter)

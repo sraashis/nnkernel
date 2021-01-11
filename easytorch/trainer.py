@@ -8,12 +8,12 @@ from collections import OrderedDict as _ODict
 
 import torch as _torch
 
+import easytorch.config as _cf
 import easytorch.data as _etdata
 import easytorch.utils as _etutils
 from easytorch.metrics import metrics as _base_metrics
 from easytorch.utils.tensorutils import initialize_weights as _init_weights
 from easytorch.vision import plotter as _log_utils
-import easytorch.config as _cf
 
 _sep = _os.sep
 
@@ -51,7 +51,7 @@ class ETTrainer:
 
         self._init_nn_weights()
         self._init_optimizer()
-        self._set_gpus()
+        self._set_device()
 
     def _init_nn_weights(self):
         r"""
@@ -105,22 +105,26 @@ class ETTrainer:
         """
         raise NotImplementedError('Must be implemented in child class.')
 
-    def _set_gpus(self):
+    def _set_device(self):
         r"""
         Initialize GPUs based on whats provided in args(Default [0])
         Expects list of GPUS as [0, 1, 2, 3]., list of GPUS will make it use DataParallel.
         If no GPU is present, CPU is used.
         """
         if _cf.cuda_available:
-            if not self.args['use_ddp']:
-                self.device['gpu'] = _torch.device(f"cuda:{self.args['gpus'][0]}")
-            else:
+            if self.args['use_ddp']:
+                for model_key in self.nn:
+                    self.nn[model_key] = self.nn[model_key].to(self.device['gpu'])
                 for model_key in self.nn:
                     self.nn[model_key] = _torch.nn.parallel.DistributedDataParallel(self.nn[model_key],
                                                                                     device_ids=[self.device['gpu']])
-
-        for model_key in self.nn:
-            self.nn[model_key] = self.nn[model_key].to(self.device['gpu'])
+            elif len(self.args['gpus']) >= 1:
+                self.device['gpu'] = _torch.device(f"cuda:{self.args['gpus'][0]}")
+                if len(self.args['gpus']) >= 2:
+                    for model_key in self.nn:
+                        self.nn[model_key] = _torch.nn.DataParallel(self.nn[model_key], self.args['gpus'])
+                for model_key in self.nn:
+                    self.nn[model_key] = self.nn[model_key].to(self.device['gpu'])
 
     def _init_optimizer(self):
         r"""
