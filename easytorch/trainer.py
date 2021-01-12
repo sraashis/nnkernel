@@ -14,6 +14,7 @@ import easytorch.utils as _etutils
 from easytorch.metrics import metrics as _base_metrics
 from easytorch.utils.tensorutils import initialize_weights as _init_weights
 from easytorch.vision import plotter as _log_utils
+import torch.distributed as _dist
 
 _sep = _os.sep
 
@@ -65,8 +66,7 @@ class ETTrainer:
             for mk in self.nn:
                 _init_weights(self.nn[mk])
 
-    def load_model(self, key='checkpoint'):
-        r"""Load the best model']"""
+    def load_checkpoint_from_key(self, key='checkpoint'):
         self.load_checkpoint(self.cache['log_dir'] + _sep + self.cache[key])
 
     def load_checkpoint(self, full_path):
@@ -172,6 +172,10 @@ class ETTrainer:
             raise FileExistsError(f' ##### {self.args["log_dir"]} directory is not empty. #####')
 
     def save_checkpoint(self, file_name, src='easytorch'):
+
+        if self.args['use_ddp'] and self.device['gpu'] != 0:
+            return
+
         checkpoint = {'source': src}
         for k in self.nn:
             checkpoint['models'] = {}
@@ -186,6 +190,10 @@ class ETTrainer:
             except:
                 checkpoint['optimizers'][k] = self.optimizer[k].state_dict()
         _torch.save(checkpoint, self.cache['log_dir'] + _sep + file_name)
+
+        if self.args['use_ddp']:
+            _dist.barrier()
+
 
     def reset_dataset_cache(self):
         r"""
@@ -283,8 +291,7 @@ class ETTrainer:
 
         eval_avg = self.new_averages()
         eval_metrics = self.new_metrics()
-        val_loaders = [_etdata.ETDataLoader.new(shuffle=False, dataset=d, mode='eval', **self.args)
-                       for d in dataset_list]
+        val_loaders = [_etdata.ETDataLoader.new(mode='eval', shuffle=False, dataset=d, **self.args) for d in dataset_list]
         with _torch.no_grad():
             for loader in val_loaders:
                 its = []
@@ -353,7 +360,7 @@ class ETTrainer:
         r"""
         Main training loop.
         """
-        train_loader = _etdata.ETDataLoader.new(shuffle=True, dataset=dataset, mode='train', **self.args)
+        train_loader = _etdata.ETDataLoader.new(mode='train', shuffle=True, dataset=dataset, **self.args)
         for ep in range(1, self.args['epochs'] + 1):
 
             for k in self.nn:
